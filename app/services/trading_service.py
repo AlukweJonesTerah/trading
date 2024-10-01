@@ -174,22 +174,47 @@ async def evaluate_order_outcome_mongo(order_id: PydanticObjectId):
         return
 
     final_price = trading_pair.price
+    print(f"Evaluating order {order_id} with final price {final_price} and locked price {order.locked_price}")
+
+    # Simulated user logic - No database user fetching
+    user_simulated_balance = 1000.0
 
     # Determine if the prediction was correct
     if order.prediction == "rise" and final_price > order.locked_price:
         order.status = "win"
         payout = order.amount * 1.02  # 2% payout for correct prediction
+
+        """
+        TODO: uncomment when we have actual user
         user = await MongoUser.get(order.user_id)
         user.balance += payout
         await user.save()
+        """
+        print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+
+        user_simulated_balance += payout  # Simulate balance update
+        print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+
     elif order.prediction == "fall" and final_price < order.locked_price:
         order.status = "win"
         payout = order.amount * 1.02
+
+        """
+        TODO: uncomment when we have actual user
         user = await MongoUser.get(order.user_id)
         user.balance += payout
         await user.save()
+        """
+        print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+
+        user_simulated_balance += payout  # Simulate balance update
+        print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+
     else:
         order.status = "lose"
+        print(f"Order {order_id}: User lost. Final price: {final_price}, Locked price: {order.locked_price}.")
+        print(f"Order {order_id}: User lost. No payout, balance remains: {user_simulated_balance}")
+
 
     await order.save()
 
@@ -248,10 +273,16 @@ async def evaluate_order_outcome_with_real_time_price(order_id: str):
     :param order_id: The ID of the order to evaluate.
     """
 
+    print(f"Starting evaluation for order {order_id}...")
+
     # Fetch the order from MongoDB using the order_id
     order = await MongoOrder.get(PydanticObjectId(order_id))
-    if not order or order.status != "pending":
-        print(f"Order {order_id} not found or not pending.")
+    if not order:
+        print(f"Order {order_id} not found.")
+        return
+
+    if order.status != "pending":
+        print(f"Order {order_id} is no longer pending (status: {order.status}).")
         return
 
     # Get the real-time price of the trading pair from `latest_prices`
@@ -263,24 +294,50 @@ async def evaluate_order_outcome_with_real_time_price(order_id: str):
 
     print(f"Evaluating order {order_id} with final price {final_price} and locked price {order.locked_price}")
 
+    # Simulated user logic - No database user fetching
+    user_simulated_balance = 1000.0
+
+    # Fetch the user from MongoDB
+    user = await MongoUser.get(order.user_id)
+    if not user:
+        print(f"User with ID {order.user_id} not found.")
+        return
+
     # Determine if the prediction was correct and update order status
     if order.prediction == "rise" and final_price > order.locked_price:
         order.status = "win"
         payout = order.amount * 1.02  # 2% payout for correct prediction
-        user = await MongoUser.get(order.user_id)
-        user.balance += payout
+        """
+        TODO: uncomment when actual user 
+        
+        user = await MongoUser.get(order.user_id) 
+        user.balance += payout 
         await user.save()
+        """
         print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+
+        user_simulated_balance += payout  # Simulate balance update
+        print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+
     elif order.prediction == "fall" and final_price < order.locked_price:
         order.status = "win"
         payout = order.amount * 1.02
+        """
+        TODO: uncomment when actual user
+        
         user = await MongoUser.get(order.user_id)
         user.balance += payout
         await user.save()
+        """
         print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+
+        user_simulated_balance += payout  # Simulate balance update
+        print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
     else:
         order.status = "lose"
         print(f"Order {order_id}: User lost. Final price: {final_price}, Locked price: {order.locked_price}.")
+        print(f"Order {order_id}: User lost. No payout, balance remains: {user_simulated_balance}")
+
 
     # Save the updated order status
     await order.save()

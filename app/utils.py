@@ -49,7 +49,7 @@ WEBSOCKET_CURRENCY_PAIRS = {
 # Dictionary to store the last update time for each symbol
 last_update_times = {}
 
-async def should_update(symbol: str, interval: int = 3):
+async def should_update(symbol: str, interval: int = 2):
     """
     Determines whether a trading pair should be updated based on the throttling interval.
     :param symbol: Symbol of the trading pair
