@@ -1,0 +1,12 @@
+# List of required Python packages
+fastapi~=0.115.0
+SQLAlchemy~=2.0.35
+beanie~=1.26.0
+numpy~=1.26.4
+tensorflow~=2.17.0
+scikit-learn~=1.5.2
+pandas~=2.2.3
+statsmodels~=0.14.3
+requests~=2.32.3
+pydantic~=2.9.2
+motor~=3.6.0
