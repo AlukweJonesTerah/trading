@@ -4,19 +4,26 @@
 
 from sqlalchemy.orm import Session
 from beanie import PydanticObjectId
+from pymongo.errors import PyMongoError
 from app.models import TradingPair, Order, User, MongoOrder, MongoUser, MongoTradingPair
 from fastapi import HTTPException
 from datetime import datetime
 import asyncio
+import logging
 from app.schemas import OrderCreate
 from app.database import Base, engine, SessionLocal
-from app.utils import latest_prices
+from app.utils import latest_prices, latest_prices_lock
 
+MAX_PENDING_ORDERS = 3  # Maximum allowed pending orders per user
 MIN_TRADE_AMOUNT = 10.0  # Minimum trade amount in dollars
 MAX_TRADE_AMOUNT = 1000.0  # Maximum trade amount in dollars
 VALID_TRADE_TIMES = [30, 60, 90, 120, 150, 180, 210, 240, 270, 300]  # 30 seconds to 5 minutes
-VALID_CURRENCY_TYPES = ["BTC", "ETH", "LTC", "XRP", "BNB"]
+VALID_CURRENCY_TYPES = ["BTC", "ETH", "LTC", "XRP", "BNB", "KES", "USD", "JPY", "EUR"]
 
+# Lock for managing concurrent evaluations
+evaluation_lock = asyncio.Lock()
+
+logger = logging.getLogger(__name__)
 
 def validate_trade(order: OrderCreate):
     if order.amount < MIN_TRADE_AMOUNT:
@@ -35,6 +42,11 @@ def validate_trade(order: OrderCreate):
     if order.symbol not in VALID_CURRENCY_TYPES:
         raise HTTPException(status_code=400, detail="Invalid currency type.")
 
+async def count_pending_orders_for_user(user_id: str) -> int:
+    """
+    Count how many pending orders a user currently has in the system.
+    """
+    return await MongoOrder.find({"user_id": PydanticObjectId(user_id), "status": "pending"}).count()
 
 async def place_order_mongo(order: OrderCreate, user_id: str):
     # Get the trading pair from MongoDB
@@ -163,63 +175,105 @@ def evaluate_order_outcome_sqlalchemy(order_id: int, db: Session):
 
 
 async def evaluate_order_outcome_mongo(order_id: PydanticObjectId):
-    # Fetch the order from MongoDB
-    order = await MongoOrder.get(order_id)
-    if not order or order.status != "pending":
-        return
+    async with evaluation_lock:
+        logger.info(f"Starting evaluation for order {order_id} at {datetime.utcnow()}")
+        try:
+            # Fetch the order from MongoDB
+            order = await MongoOrder.get(order_id)
+            if not order:
+                print(f"Order {order_id} not found.")
+                logger.error(f"Order {order_id} not found.")
+                return
 
-    # Get the current price of the trading pair
-    trading_pair = await MongoTradingPair.find_one(MongoTradingPair.symbol == order.symbol)
-    if not trading_pair:
-        return
+            logger.info(f"Order {order_id} fetched successfully.")
 
-    final_price = trading_pair.price
-    print(f"Evaluating order {order_id} with final price {final_price} and locked price {order.locked_price}")
+            if order.status != "pending":
+                print(f"Order {order_id} is no longer pending (status: {order.status}).")
+                logger.warning(f"Order {order_id} is no longer pending (status: {order.status}). Evaluation skipped.")
+                return
 
-    # Simulated user logic - No database user fetching
-    user_simulated_balance = 1000.0
+            # Get the current price of the trading pair
+            trading_pair = await MongoTradingPair.find_one(MongoTradingPair.symbol == order.symbol)
+            if not trading_pair:
+                return
 
-    # Determine if the prediction was correct
-    if order.prediction == "rise" and final_price > order.locked_price:
-        order.status = "win"
-        payout = order.amount * 1.02  # 2% payout for correct prediction
+            # Check if the latest price is available for the order's symbol
+            async with latest_prices_lock:
+                if order.symbol not in latest_prices:
+                    logger.error(f"Real-time price for {order.symbol} not found. Evaluation aborted.")
+                    return
 
-        """
-        TODO: uncomment when we have actual user
-        user = await MongoUser.get(order.user_id)
-        user.balance += payout
-        await user.save()
-        """
-        print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+            final_price = trading_pair.price
 
-        user_simulated_balance += payout  # Simulate balance update
-        print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+            logger.info(f"Evaluating order {order_id} with final price {final_price} and locked price {order.locked_price}")
+            print(f"Evaluating order {order_id} with final price {final_price} and locked price {order.locked_price}")
 
-    elif order.prediction == "fall" and final_price < order.locked_price:
-        order.status = "win"
-        payout = order.amount * 1.02
+            # # Fetch the user from MongoDB
+            # user = await MongoUser.get(order.user_id)
+            # if not user:
+            #     print(f"User with ID {order.user_id} not found.")
+            #     return
 
-        """
-        TODO: uncomment when we have actual user
-        user = await MongoUser.get(order.user_id)
-        user.balance += payout
-        await user.save()
-        """
-        print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+            # Simulated user logic - No database user fetching
+            user_simulated_balance = 1000.0
 
-        user_simulated_balance += payout  # Simulate balance update
-        print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+            # Determine if the prediction was correct
+            if order.prediction == "rise" and final_price > order.locked_price:
+                order.status = "win"
+                payout = order.amount * 1.02  # 2% payout for correct prediction
 
-    else:
-        order.status = "lose"
-        print(f"Order {order_id}: User lost. Final price: {final_price}, Locked price: {order.locked_price}.")
-        print(f"Order {order_id}: User lost. No payout, balance remains: {user_simulated_balance}")
+                """
+                TODO: uncomment when we have actual user
+                user = await MongoUser.get(order.user_id)
+                user.balance += payout
+                await user.save()
+                """
+                print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
 
+                user_simulated_balance += payout  # Simulate balance update
+                print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
 
-    await order.save()
+            elif order.prediction == "fall" and final_price < order.locked_price:
+                order.status = "win"
+                payout = order.amount * 1.02
+
+                """
+                TODO: uncomment when we have actual user
+                user = await MongoUser.get(order.user_id)
+                user.balance += payout
+                await user.save()
+                """
+                print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+
+                user_simulated_balance += payout  # Simulate balance update
+                print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+
+            else:
+                order.status = "lose"
+                print(f"Order {order_id}: User lost. Final price: {final_price}, Locked price: {order.locked_price}.")
+                print(f"Order {order_id}: User lost. No payout, balance remains: {user_simulated_balance}")
+
+            # Update order status to 'evaluated'
+            order.status = "evaluated"
+            await order.save()  # Save the updated order in MongoDB
+            # await user.save()
+            logger.info(f"Order {order_id} evaluated successfully. Outcome: {order.status}")
+
+        except PyMongoError as db_error:
+            logger.error(f"MongoDB error during evaluation of order {order_id}: {db_error}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during evaluation of order {order_id}: {e}")
 
 
 async def place_order_with_real_time_price(order: OrderCreate, user_id: str): # , user_id: str
+
+    # Count how many pending orders the user has
+    pending_order_count = await count_pending_orders_for_user(user_id)
+
+    # Check if the user has exceeded the maximum allowed pending orders
+    if pending_order_count >= MAX_PENDING_ORDERS:
+        raise HTTPException(status_code=400,
+                            detail="You have too many pending orders. Please wait for your existing orders to be evaluated before placing new ones.")
     # Validate trade
     validate_trade(order)
 
@@ -273,76 +327,97 @@ async def evaluate_order_outcome_with_real_time_price(order_id: str):
     :param order_id: The ID of the order to evaluate.
     """
 
+    logger.info(f"Starting evaluation for order {order_id} at {datetime.utcnow()}")
     print(f"Starting evaluation for order {order_id}...")
+    async with evaluation_lock:
+        try:
+            # Fetch the order from MongoDB using the order_id
+            order = await MongoOrder.get(PydanticObjectId(order_id))
+            if not order:
+                print(f"Order {order_id} not found.")
+                logger.error(f"Order {order_id} not found.")
+                return
 
-    # Fetch the order from MongoDB using the order_id
-    order = await MongoOrder.get(PydanticObjectId(order_id))
-    if not order:
-        print(f"Order {order_id} not found.")
-        return
+            logger.info(f"Order {order_id} fetched successfully.")
 
-    if order.status != "pending":
-        print(f"Order {order_id} is no longer pending (status: {order.status}).")
-        return
+            if order.status != "pending":
+                print(f"Order {order_id} is no longer pending (status: {order.status}).")
+                logger.warning(f"Order {order_id} is no longer pending (status: {order.status}). Evaluation skipped.")
+                return
 
-    # Get the real-time price of the trading pair from `latest_prices`
-    if order.symbol not in latest_prices:
-        print(f"Real-time price for {order.symbol} not found.")
-        return
+            # Get the real-time price of the trading pair from `latest_prices`
+            async with latest_prices_lock:
+                if order.symbol not in latest_prices:
+                    print(f"Real-time price for {order.symbol} not found.")
+                    logger.error(f"Real-time price for {order.symbol} not found. Evaluation aborted.")
+                    return
 
-    final_price = latest_prices[order.symbol]
+                final_price = latest_prices[order.symbol]
 
-    print(f"Evaluating order {order_id} with final price {final_price} and locked price {order.locked_price}")
+            logger.info(f"Evaluating order {order_id} with final price {final_price} and locked price {order.locked_price}")
+            print(f"Evaluating order {order_id} with final price {final_price} and locked price {order.locked_price}")
 
-    # Simulated user logic - No database user fetching
-    user_simulated_balance = 1000.0
+            # Simulated user logic - No database user fetching
+            user_simulated_balance = 1000.0
 
-    # Fetch the user from MongoDB
-    user = await MongoUser.get(order.user_id)
-    if not user:
-        print(f"User with ID {order.user_id} not found.")
-        return
+            # Fetch the user from MongoDB
+            user = await MongoUser.get(order.user_id)
+            if not user:
+                print(f"User with ID {order.user_id} not found.")
+                return
 
-    # Determine if the prediction was correct and update order status
-    if order.prediction == "rise" and final_price > order.locked_price:
-        order.status = "win"
-        payout = order.amount * 1.02  # 2% payout for correct prediction
-        """
-        TODO: uncomment when actual user 
-        
-        user = await MongoUser.get(order.user_id) 
-        user.balance += payout 
-        await user.save()
-        """
-        print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+            # Determine if the prediction was correct and update order status
+            if order.prediction == "rise" and final_price > order.locked_price:
+                order.status = "win"
+                payout = order.amount * 1.02  # 2% payout for correct prediction
+                """
+                TODO: uncomment when actual user 
+                
+                user = await MongoUser.get(order.user_id) 
+                user.balance += payout 
+                await user.save()
+                logger.info(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+                """
+                print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
 
-        user_simulated_balance += payout  # Simulate balance update
-        print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+                user_simulated_balance += payout  # Simulate balance update
+                print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+                logger.info(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
 
-    elif order.prediction == "fall" and final_price < order.locked_price:
-        order.status = "win"
-        payout = order.amount * 1.02
-        """
-        TODO: uncomment when actual user
-        
-        user = await MongoUser.get(order.user_id)
-        user.balance += payout
-        await user.save()
-        """
-        print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
+            elif order.prediction == "fall" and final_price < order.locked_price:
+                order.status = "win"
+                payout = order.amount * 1.02
+                """
+                TODO: uncomment when actual user
+                
+                user = await MongoUser.get(order.user_id)
+                user.balance += payout
+                await user.save()
+                logger.info(f"Order {order_id} evaluated successfully. Outcome: {order.outcome}")
+                Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}."
+                """
+                print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
 
-        user_simulated_balance += payout  # Simulate balance update
-        print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
-    else:
-        order.status = "lose"
-        print(f"Order {order_id}: User lost. Final price: {final_price}, Locked price: {order.locked_price}.")
-        print(f"Order {order_id}: User lost. No payout, balance remains: {user_simulated_balance}")
+                user_simulated_balance += payout  # Simulate balance update
+                logger.info(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+                print(f"Order {order_id}: Simulated User won! Final price: {final_price}, Locked price: {order.locked_price}. New balance: {user_simulated_balance}")
+            else:
+                order.status = "lose"
+                print(f"Order {order_id}: User lost. Final price: {final_price}, Locked price: {order.locked_price}.")
+                print(f"Order {order_id}: User lost. No payout, balance remains: {user_simulated_balance}")
 
+            # Update order status to 'evaluated'
+            order.status = "evaluated"
 
-    # Save the updated order status
-    await order.save()
+            await order.save() # Save the updated order status
+            logger.info(f"Order {order_id} evaluated successfully. Outcome: {order.outcome}")
 
-    print(f"Order {order_id} evaluated with real-time price: {final_price}, Status: {order.status}")
+            print(f"Order {order_id} evaluated with real-time price: {final_price}, Status: {order.status}")
+        except PyMongoError as db_error:
+            logger.error(f"MongoDB error during evaluation of order {order_id}: {db_error}")
+
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during evaluation of order {order_id}: {e}")
 
 def schedule_evaluation(trade_time: int, order_id: str, db=None, real_time=False):
     """
@@ -351,14 +426,18 @@ def schedule_evaluation(trade_time: int, order_id: str, db=None, real_time=False
     """
     async def evaluate():
         await asyncio.sleep(trade_time)  # Wait for the specified trade time
-        if db:
-            evaluate_order_outcome_sqlalchemy(order_id, db)
-        elif real_time:
-            print(f"Scheduling evaluation for order {order_id} after {trade_time} seconds.")
-            await asyncio.sleep(trade_time)  # Wait for the specified trade time
-            await evaluate_order_outcome_with_real_time_price(order_id)
-        else:
-            await evaluate_order_outcome_mongo(order_id)
+        try:
+            if real_time:
+                print(f"Scheduling real-time evaluation for order {order_id} after {trade_time} seconds.")
+                await evaluate_order_outcome_with_real_time_price(order_id)
+            elif db:
+                print(f"Scheduling SQLAlchemy evaluation for order {order_id}.")
+                await evaluate_order_outcome_sqlalchemy(order_id, db)
+            else:
+                print(f"Scheduling MongoDB evaluation for order {order_id}.")
+                await evaluate_order_outcome_mongo(PydanticObjectId(order_id))
+        except Exception as e:
+            logger.error(f"Error during evaluation of order {order_id}: {e}")
 
-    # evaluation is scheduled as a background task
+    # Start the evaluation task
     asyncio.create_task(evaluate())

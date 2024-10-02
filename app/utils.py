@@ -16,14 +16,21 @@ TODO: implement a throttling mechanism to limit how often you log updates
 import asyncio
 import websockets
 import json
+import time
+import logging
 from sqlalchemy.orm import Session
 from app.models import TradingPair, MongoTradingPair
-import time
+from contextlib import asynccontextmanager
 
+logger = logging.getLogger(__name__)
+
+# Global dictionary to hold the latest prices of trading pairs
+latest_prices = {}
+latest_prices_lock = asyncio.Lock()
 
 # WebSocket URLs for different sources
 BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
-KRAKEN_WS_URL = "wss://ws.kraken.com"  # Corrected Kraken WebSocket URL for real-time data
+KRAKEN_WS_URL = "wss://ws.kraken.com"
 
 # Mapping of symbols to our internal representation
 WEBSOCKET_CURRENCY_PAIRS = {
@@ -32,11 +39,10 @@ WEBSOCKET_CURRENCY_PAIRS = {
     "ltcusdt": "LTC",
     "bnbusdt": "BNB",
     "xrpusdt": "XRP",
-
-
     "XBT/USD": "BTC",
     "ETH/USD": "ETH",
     "USD/KSH": "KES",
+    "USD/UGX": "UGX",
     "EUR/USD": "USD",
     "USD/JPY": "JPY",
     "eurusd": "EUR/USD",
@@ -65,17 +71,15 @@ async def should_update(symbol: str, interval: int = 2):
         return True
     return False
 
-
 # Subscription message for Kraken WebSocket
 def get_kraken_subscription_message():
     return json.dumps({
         "event": "subscribe",
-        "pair": ["XBT/USD", "ETH/USD"],  # Specify the pairs you want to subscribe to
+        "pair": ["XBT/USD", "ETH/USD", "BTC/USD", "USD/KES", "USD/JPY", "EUR/USD" "USD/UGX"],  # Specify the pairs you want to subscribe to
         "subscription": {
             "name": "ticker"  # Subscribe to ticker updates
         }
     })
-
 
 # Subscription message for Binance WebSocket
 def get_binance_subscription_message():
@@ -91,105 +95,113 @@ def get_binance_subscription_message():
         "id": 1
     })
 
-
 async def send_pings(websocket, interval=30):
+    """
+    Send pings at regular intervals to keep the WebSocket connection alive.
+    :param websocket: The WebSocket connection
+    :param interval: Ping interval in seconds
+    """
     while True:
         await asyncio.sleep(interval)
         try:
             pong_waiter = await websocket.ping()
-            await asyncio.wait_for(pong_waiter, timeout=10)  # Wait for the pong message with a timeout
-            print("Ping successful!")
+            await asyncio.wait_for(pong_waiter, timeout=30)  # Wait for the pong message with a timeout
+            logger.info("Ping successful!")
         except asyncio.TimeoutError:
-            print("Ping timed out. Connection might be unstable.")
+            logger.error("Ping timed out. Connection might be unstable.")
             break
         except Exception as e:
-            print(f"Failed to send ping: {e}")
+            logger.error(f"Failed to send ping: {e}")
             break
 
-# Global dictionary to store the latest prices
-latest_prices = {}
-
-async def fetch_real_time_prices(db_session):
+async def reconnect_with_backoff(url, subscription_message, db_session):
     """
-    Fetch real-time prices for cryptocurrencies and fiat currencies
-    using WebSocket connections.
+    Reconnect to the WebSocket with exponential backoff on connection failures.
+    :param url: WebSocket URL to connect to
+    :param subscription_message: The message to send to subscribe to the WebSocket updates
+    :param db_session: SQLAlchemy session for database interaction
     """
+    delay = 2  # Initial delay in seconds
+    max_delay = 60  # Maximum delay in seconds
+    while True:
+        try:
+            # Create a new WebSocket connection
+            websocket = await websockets.connect(url, ping_interval=500, ping_timeout=30)
+            logger.info(f"Connected to WebSocket at {url} and subscribing to currency pairs.")
+            await websocket.send(subscription_message)
+            asyncio.create_task(send_pings(websocket, interval=120))  # Start sending pings
 
-    async def binance_websocket_listener():
-        while True:
-            try:
-                async with websockets.connect(BINANCE_WS_URL, ping_interval=30, ping_timeout=10) as websocket:
-                    await websocket.send(get_binance_subscription_message())
-                    print("Connected to Binance WebSocket and subscribed to crypto trading pairs.")
+            # Listen for messages
+            while True:
+                message = await websocket.recv()
+                await handle_message(message, db_session)
 
-                    # Start a background task to send pings for keep-alive
-                    asyncio.create_task(send_pings(websocket))
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.error(f"Connection closed: {e}. Retrying in {delay} seconds...")
+        except Exception as e:
+            logger.error(f"Failed to connect to WebSocket: {e}. Retrying in {delay} seconds...")
 
-                    while True:
-                        message = await websocket.recv()
-                        data = json.loads(message)
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, max_delay)  # Exponential backoff
 
-                        if data.get("e") == "trade":
-                            symbol = data["s"].lower()
-                            price = float(data["p"])
-                            if symbol in WEBSOCKET_CURRENCY_PAIRS:
-                                mapped_symbol = WEBSOCKET_CURRENCY_PAIRS[symbol]
-                                # throttling
-                                if await should_update(mapped_symbol):
-                                    # print(f"Binance update for {mapped_symbol}: {price}")
-                                    latest_prices[mapped_symbol] = price
-                                    # print(f"Binance update for {latest_prices}")
-                                    await update_or_create_trading_pair(db_session, mapped_symbol, price)
+async def handle_message(message, db_session):
+    """
+    Handle incoming WebSocket messages and update trading pairs in the database.
+    :param message: The WebSocket message
+    :param db_session: SQLAlchemy session for database interaction
+    """
+    try:
+        data = json.loads(message)
+        # print(f"Received message: {data}")  # Debug print to inspect the structure of the message
 
-            except websockets.exceptions.ConnectionClosed as e:
-                print(f"Connection closed: {e}. Attempting to reconnect...")
-                await asyncio.sleep(5)  # Wait before reconnecting
-            except OSError as e:
-                print(f"OSError: {e}. Retrying connection...")
-                await asyncio.sleep(5)
-            except Exception as e:
-                print(f"Failed to connect to Binance WebSocket: {e}. Retrying...")
-                await asyncio.sleep(5)  # Wait before trying again
+        # Handle Binance messages: They usually come as a dictionary
+        if isinstance(data, dict) and data.get("e") == "trade":  # Filter for trade events
+            symbol = data["s"].lower()  # Trading pair symbol (e.g., 'ETHUSDT')
+            price = float(data["p"])  # Latest price
+            if symbol in WEBSOCKET_CURRENCY_PAIRS:
+                mapped_symbol = WEBSOCKET_CURRENCY_PAIRS[symbol]
+                if await should_update(mapped_symbol):
+                    async with latest_prices_lock:
+                        latest_prices[mapped_symbol] = price
+                    await update_or_create_trading_pair(db_session, mapped_symbol, price)
 
-    async def kraken_websocket_listener():
-        while True:
-            try:
-                async with websockets.connect(KRAKEN_WS_URL, ping_interval=30, ping_timeout=10) as websocket:
-                    print("Connected to Kraken WebSocket and subscribing to currency pairs.")
-                    await websocket.send(get_kraken_subscription_message())
+        # Handle Kraken messages: These usually come as a list
+        elif isinstance(data, list) and len(data) > 1 and isinstance(data[1], dict):
+            pair = data[3]  # The trading pair (e.g., XBT/USD)
+            price = float(data[1]['c'][0])  # Current price from the response
+            mapped_symbol = WEBSOCKET_CURRENCY_PAIRS.get(pair)
+            if mapped_symbol:
+                if await should_update(mapped_symbol):
+                    async with latest_prices_lock:
+                        latest_prices[mapped_symbol] = price
+                    await update_or_create_trading_pair(db_session, mapped_symbol, price)
 
-                    # Start a background task to send pings for keep-alive
-                    asyncio.create_task(send_pings(websocket))
+    except Exception as e:
+        logger.error(f"Error handling message: {e}")
 
-                    while True:
-                        message = await websocket.recv()
-                        data = json.loads(message)
+async def binance_websocket_listener(db_session):
+    """
+    Binance WebSocket listener for receiving real-time price updates.
+    :param db_session: SQLAlchemy session for database interaction
+    """
+    await reconnect_with_backoff(BINANCE_WS_URL, get_binance_subscription_message(), db_session)
 
-                        if isinstance(data, list) and len(data) > 1 and isinstance(data[1], dict):
-                            pair = data[3]  # The trading pair (e.g., XBT/USD)
-                            price = data[1]['c'][0]  # Current price from the response
-                            mapped_symbol = WEBSOCKET_CURRENCY_PAIRS.get(pair)
-                            if mapped_symbol:
-                                # throttling
-                                if await should_update(mapped_symbol):
-                                    # print(f"Kraken update for {mapped_symbol}: {price}")
-                                    latest_prices[mapped_symbol] = price
-                                    # print(f"Kraken update for {latest_prices}")
-                                    await update_or_create_trading_pair(db_session, mapped_symbol, price)
+async def kraken_websocket_listener(db_session):
+    """
+    Kraken WebSocket listener for receiving real-time price updates.
+    :param db_session: SQLAlchemy session for database interaction
+    """
+    await reconnect_with_backoff(KRAKEN_WS_URL, get_kraken_subscription_message(), db_session)
 
-            except websockets.exceptions.ConnectionClosed as e:
-                print(f"Connection closed: {e}. Attempting to reconnect...")
-                await asyncio.sleep(5)  # Wait before reconnecting
-            except OSError as e:
-                print(f"OSError: {e}. Retrying connection...")
-                await asyncio.sleep(5)  # Wait before trying again
-            except Exception as e:
-                print(f"Failed to connect to Kraken WebSocket: {e}. Retrying...")
-                await asyncio.sleep(5)  # Wait before trying again
-
-    # Start both listeners
-    await asyncio.gather(binance_websocket_listener(), kraken_websocket_listener())
-
+async def fetch_real_time_prices(db_session: Session):
+    """
+    Fetch real-time prices for cryptocurrencies and fiat currencies using WebSocket connections.
+    :param db_session: SQLAlchemy session for database interaction
+    """
+    await asyncio.gather(
+        binance_websocket_listener(db_session),
+        kraken_websocket_listener(db_session)
+    )
 
 async def update_or_create_trading_pair(db: Session, symbol: str, price: float):
     """
@@ -203,20 +215,15 @@ async def update_or_create_trading_pair(db: Session, symbol: str, price: float):
         trading_pair = db.query(TradingPair).filter(TradingPair.symbol == symbol).first()
 
         if trading_pair:
-            # Update the existing trading pair's price
             trading_pair.price = price
         else:
-            # Create a new trading pair
             trading_pair = TradingPair(symbol=symbol, price=price)
             db.add(trading_pair)
-        # Commit the changes
         db.commit()
-        db.refresh(trading_pair) # Refresh the updated trading pair
-
+        db.refresh(trading_pair)  # Refresh the updated trading pair
 
         # Update or create in MongoDB (Beanie)
         mongo_trading_pair = await MongoTradingPair.find_one(MongoTradingPair.symbol == symbol)
-
         if mongo_trading_pair:
             mongo_trading_pair.price = price
             await mongo_trading_pair.save()
@@ -226,4 +233,4 @@ async def update_or_create_trading_pair(db: Session, symbol: str, price: float):
 
     except Exception as e:
         db.rollback()
-        print(f"Error occurred while updating/creating trading pair {symbol}: {e}")
+        logger.error(f"Error occurred while updating/creating trading pair {symbol}: {e}")
