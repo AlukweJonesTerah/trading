@@ -12,7 +12,7 @@ import asyncio
 import logging
 from app.schemas import OrderCreate
 from app.database import Base, engine, SessionLocal
-from app.utils import latest_prices, latest_prices_lock
+from app.utils import  latest_prices, latest_prices_lock
 
 MAX_PENDING_ORDERS = 3  # Maximum allowed pending orders per user
 MIN_TRADE_AMOUNT = 10.0  # Minimum trade amount in dollars
@@ -268,12 +268,12 @@ async def evaluate_order_outcome_mongo(order_id: PydanticObjectId):
 async def place_order_with_real_time_price(order: OrderCreate, user_id: str): # , user_id: str
 
     # Count how many pending orders the user has
-    pending_order_count = await count_pending_orders_for_user(user_id)
+    # pending_order_count = await count_pending_orders_for_user(user_id)
 
     # Check if the user has exceeded the maximum allowed pending orders
-    if pending_order_count >= MAX_PENDING_ORDERS:
-        raise HTTPException(status_code=400,
-                            detail="You have too many pending orders. Please wait for your existing orders to be evaluated before placing new ones.")
+    # if pending_order_count >= MAX_PENDING_ORDERS:
+    #     raise HTTPException(status_code=400,
+    #                         detail="You have too many pending orders. Please wait for your existing orders to be evaluated before placing new ones.")
     # Validate trade
     validate_trade(order)
 

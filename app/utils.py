@@ -21,10 +21,18 @@ import logging
 from sqlalchemy.orm import Session
 from app.models import TradingPair, MongoTradingPair
 from contextlib import asynccontextmanager
+# import aioredis
+from redis.asyncio import Redis
+
 
 logger = logging.getLogger(__name__)
 
+REDIS_HOST = "localhost" # change to actual Redis server
+REDIS_PORT = 6379
+REDIS_DB = 0
+
 # Global dictionary to hold the latest prices of trading pairs
+
 latest_prices = {}
 latest_prices_lock = asyncio.Lock()
 
@@ -53,7 +61,25 @@ WEBSOCKET_CURRENCY_PAIRS = {
 }
 
 # Dictionary to store the last update time for each symbol
+
 last_update_times = {}
+
+
+# Connect to Redis
+async def get_redis_connection():
+    return Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
+
+async def set_cache(redis: Redis, key: str, value: str, expiration: int = 60):
+    """
+    Set the key-value pair in Redis with an optional expiration time.
+    """
+    await redis.set(key, value, ex=expiration)
+
+async def get_cache(redis: Redis, key: str):
+    """
+    Get the value for a key from Redis.
+    """
+    return await redis.get(key)
 
 async def should_update(symbol: str, interval: int = 2):
     """
@@ -75,7 +101,7 @@ async def should_update(symbol: str, interval: int = 2):
 def get_kraken_subscription_message():
     return json.dumps({
         "event": "subscribe",
-        "pair": ["XBT/USD", "ETH/USD", "BTC/USD", "USD/KES", "USD/JPY", "EUR/USD" "USD/UGX"],  # Specify the pairs you want to subscribe to
+        "pair": ["XBT/USD", "ETH/USD", "BTC/USD", "USD/KES", "USD/JPY", "EUR/USD" "USD/UGX"],  # pairs to subscribe to
         "subscription": {
             "name": "ticker"  # Subscribe to ticker updates
         }
@@ -144,6 +170,7 @@ async def reconnect_with_backoff(url, subscription_message, db_session):
         await asyncio.sleep(delay)
         delay = min(delay * 2, max_delay)  # Exponential backoff
 
+
 async def handle_message(message, db_session):
     """
     Handle incoming WebSocket messages and update trading pairs in the database.
@@ -179,6 +206,7 @@ async def handle_message(message, db_session):
     except Exception as e:
         logger.error(f"Error handling message: {e}")
 
+
 async def binance_websocket_listener(db_session):
     """
     Binance WebSocket listener for receiving real-time price updates.
@@ -202,6 +230,7 @@ async def fetch_real_time_prices(db_session: Session):
         binance_websocket_listener(db_session),
         kraken_websocket_listener(db_session)
     )
+
 
 async def update_or_create_trading_pair(db: Session, symbol: str, price: float):
     """
