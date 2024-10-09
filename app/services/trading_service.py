@@ -70,14 +70,32 @@ async def place_order_with_real_time_price(order: OrderCreate, user_id: Optional
     if user_id is None:
         user_id = "6706b0b9571ca603c9868674"   # Temporary user ID
 
-    # Validate trade
-    validate_trade(order)
+    # Validate trade data
+    try:
+        validate_trade(order)
+    except HTTPException as e:
+        logger.error(f"Trade validation failed: {e.detail}")
+        raise e
 
     # Acquire the latest prices safely using a lock to avoid race conditions
     async with latest_prices_lock:
         if order.symbol not in latest_prices:
             raise HTTPException(status_code=404, detail="Real-time price not available for the trading pair.")
         locked_price = latest_prices[order.symbol]
+
+    # fecting the user to updated his/her balance
+    user = await MongoUser.get(PydanticObjectId(user_id))
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # check if the user has enough balance in account to allow betting
+    if user.balance < order.amount:
+        raise HTTPException(status_code=400, detail="Insufficient balance to place the order")
+
+    # make deduction of order amount from the user's balance
+    user.balance -= order.amount
+    await user.save()  # save the new updated useer's balnce
 
     # Lock the price and proceed with placing the order
     order_data = {
@@ -88,7 +106,7 @@ async def place_order_with_real_time_price(order: OrderCreate, user_id: Optional
         "trade_time": order.trade_time,
         "locked_price": locked_price,
         "start_time": datetime.utcnow(),
-        "status": "pending"
+        "status": "pending",
     }
 
     # Insert the order into the MongoDB collection
@@ -109,7 +127,7 @@ async def place_order_with_real_time_price(order: OrderCreate, user_id: Optional
         "trade_time": mongo_order.trade_time,
         "locked_price": mongo_order.locked_price,
         "start_time": mongo_order.start_time,
-        "status": mongo_order.status
+        "status": mongo_order.status,
     }
 
 
@@ -145,10 +163,13 @@ async def evaluate_order_outcome_with_real_time_price(order_id: str):
             print(f"User with ID {order.user_id} not found.")
             return
 
+        payout = 0
+
         # Determine if the prediction was correct and update order status
         if order.prediction == "rise" and final_price > order.locked_price:
             order.status = "win"
             payout = order.amount * 1.02  # 2% payout for correct prediction
+            order.payout = payout  # setting payout value
             print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
 
             # Update user's balance
@@ -156,12 +177,14 @@ async def evaluate_order_outcome_with_real_time_price(order_id: str):
         elif order.prediction == "fall" and final_price < order.locked_price:
             order.status = "win"
             payout = order.amount * 1.02
+            order.payout = payout
             print(f"Order {order_id}: User won! Final price: {final_price}, Locked price: {order.locked_price}.")
 
             # Update user's balance
             user.balance += payout
         else:
             order.status = "lose"
+            order.payout = 0  # setting payout to 0 (zero) if the user loses
             print(f"Order {order_id}: User lost. Final price: {final_price}, Locked price: {order.locked_price}.")
 
         # Save the updated order status and user balance in a non-blocking way

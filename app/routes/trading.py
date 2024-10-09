@@ -18,6 +18,8 @@ from fastapi.security import OAuth2PasswordBearer
 from app.services.trading_service import validate_trade
 from jose import jwt, JWTError
 import logging
+from bson import ObjectId
+from typing import List
 import app.services.trading_service
 from app.dependencies import get_current_user_id
 
@@ -101,6 +103,7 @@ async def place_order(order: OrderCreate):  #  , user_id: str = Depends(get_curr
     """
     Endpoint to place an order with the current real-time price for the trading pair.
     """
+    logger.info("Received order placement request.")
     try:
         # Place the order with real-time price and return the response
         order_response = await trading_service.place_order_with_real_time_price(order)  # , user_id
@@ -108,6 +111,7 @@ async def place_order(order: OrderCreate):  #  , user_id: str = Depends(get_curr
     except HTTPException as e:
         raise e
     except Exception as e:
+        logger.error(f"Failed to place order: {e}")
         print(f"Error placing order: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while placing the order.")
 
@@ -171,16 +175,6 @@ async def get_real_time_prices_endpoint():
     return prices
 
 
-@router.post("/trades/real_time", response_model=OrderResponse)
-async def place_order_with_real_time(order: OrderCreate):
-    user_id = "66ffdd01e83feefe5311806e"  # Example hardcoded user ID
-    try:
-        order_response = await place_order(order)
-        return order_response
-    except HTTPException as e:
-        raise e
-
-
 @router.get("/trading_pairs/mongo")
 async def get_mongo_trading_pairs():
     trading_pairs = await MongoTradingPair.find_all().to_list()
@@ -190,7 +184,7 @@ async def get_mongo_trading_pairs():
 @router.get("/balance", response_model=dict)
 async def get_user_balance():
     # Replace with the appropriate user session or user fetching logic
-    user = await MongoUser.get(PydanticObjectId("651b9fb89f4c6e8f1b2f1f9c"))  # Hardcoded for now
+    user = await MongoUser.get(PydanticObjectId("6706b0b9571ca603c9868674"))  # Hardcoded for now
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -200,13 +194,46 @@ async def get_user_balance():
 async def get_order(order_id: str):
     """
     Retrive an order by its ID
-    :param order_id:
-    :return: order
+    :param order_id: Order ID as a string.
+    :return: order object with string fields.
     """
     order = await MongoOrder.get(PydanticObjectId(order_id))
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    # Convert MongoDB ObjectId fields to string
+    order.id = str(order.id) if isinstance(order.id, ObjectId) else order.id
+    order.user_id = str(order.user_id) if isinstance(order.user_id, ObjectId) else order.user_id
+
     return order
+
+@router.get("/orders/user/{User_id}",  response_model=List[OrderResponse])
+async  def get_order_by_user(user_id: str):
+    """
+    Retrieve all orders placed by a specific user
+    :param user_id: The ID of th user as a string.
+    :return: Alist of the orders placed by the user.
+    """
+    try:
+        # Convert the user_id to a PydanticObjectId
+        user_obj_id = PydanticObjectId(user_id)
+
+        # fect all oders with the specified user ID
+        orders = await MongoOrder.find({"user_id": user_obj_id}).to_list()
+
+        # check if oders were found
+        if not orders:
+            raise HTTPException(status_code=404, detail="No orders found for the specified user.")
+
+        # convert each of the order's id to to string for JSON serialization
+        for order in orders:
+            order.id = str(order.id)
+            order.user_id = str(order.user_id)
+
+        return orders
+    except Exception as e:
+        print(f"Error fecting oders for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred while retrieving user orders.")
 
 @router.post("/create_dummy_user", response_model=dict)
 async def create_dummy_user():
