@@ -1,12 +1,12 @@
 import asyncio
-import websockets
 import json
-import time
 import logging
-import requests
+import time
 
-from beanie import PydanticObjectId
+import requests
+import websockets
 from cachetools import TTLCache
+
 from app.models import MongoTradingPair
 
 logger = logging.getLogger(__name__)
@@ -14,9 +14,6 @@ logger = logging.getLogger(__name__)
 # TTLCache Configuration
 price_cache = TTLCache(maxsize=10000, ttl=30)
 last_update_times = TTLCache(maxsize=10000, ttl=2)  # Store last update times with a short TTL of 2 seconds
-
-# Dictionary to store the last update time for each symbol
-last_update_times = {}
 
 # Global dictionary to hold the latest prices of trading pairs
 latest_prices = {}
@@ -191,14 +188,14 @@ async def kraken_websocket_listener():
     await reconnect_with_backoff(KRAKEN_WS_URL, get_kraken_subscription_message())
 
 
-async def fetch_real_time_prices(*args, **kwargs):
+async def fetch_real_time_prices():
     """
     Fetch real-time prices for cryptocurrencies and fiat currencies using WebSocket connections.
     """
     await asyncio.gather(
         binance_websocket_listener(),
         kraken_websocket_listener(),
-        # fetch_http_prices()
+        fetch_http_prices()
     )
 
 

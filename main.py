@@ -41,6 +41,7 @@ MONGO_DB_NAME = config("MONGO_DB_NAME", default="trading_db")
 client = AsyncIOMotorClient(MONGO_URI)
 db = client[MONGO_DB_NAME]
 
+
 @app.on_event("startup")
 async def startup_event():
     # Initialize MongoDB (NoSQL) with Beanie
@@ -48,6 +49,7 @@ async def startup_event():
 
     # Start the background task for fetching real-time prices
     asyncio.create_task(start_price_fetching_task())
+
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
 from datetime import datetime
 
+
 # Shared Pydantic Schemas for Validation and Serialization
 
 # 1. User Schemas
@@ -14,6 +15,7 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50, description="Username for the user")
     email: EmailStr = Field(..., description="The user's email address")
     password: str = Field(..., min_length=6, description="Password for the user")
+
 
 class UserResponse(BaseModel):
     id: Optional[int]  # SQLAlchemy will return an integer ID, MongoDB will use a string
@@ -24,6 +26,7 @@ class UserResponse(BaseModel):
 
     class Config:
         orm_mode = True
+
 
 # 2. Trading Pair Schemas
 class TradingPairCreate(BaseModel):

@@ -6,6 +6,9 @@ from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.models import MongoUser
 from decouple import config
+# Run the function using asyncio
+import asyncio
+
 
 async def create_dummy_user():
     # Database setup
@@ -33,6 +36,5 @@ async def create_dummy_user():
     await dummy_user.insert()
     return {"message": "Dummy user created successfully", "user_id": str(dummy_user.id)}
 
-# Run the function using asyncio
-import asyncio
+
 asyncio.run(create_dummy_user())

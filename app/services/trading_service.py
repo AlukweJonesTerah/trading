@@ -1,17 +1,16 @@
-from cachetools import TTLCache
-from sqlalchemy.orm import Session
-from beanie import PydanticObjectId
-from pymongo.errors import PyMongoError
-from app.models import TradingPair, MongoOrder, MongoTradingPair, MongoUser
-from fastapi import HTTPException
-from datetime import datetime
-from typing import Dict, Optional
 import asyncio
 import logging
-from app.schemas import OrderCreate
-from app.utils import price_cache, cache_lock, latest_prices
-from app.utils import fetch_real_time_prices
+import re
+from datetime import datetime
+from typing import Optional
 
+from beanie import PydanticObjectId
+from cachetools import TTLCache
+from fastapi import HTTPException
+
+from app.models import MongoOrder, MongoUser
+from app.schemas import OrderCreate
+from app.utils import latest_prices
 
 # Configure TTLCache with a maxsize of 1000 and TTL of 60 seconds for each price entry
 price_cache = TTLCache(maxsize=10000, ttl=30)
@@ -19,7 +18,6 @@ price_cache = TTLCache(maxsize=10000, ttl=30)
 # Mock shared state for real-time prices (replace this with your actual implementation)
 # latest_prices: Dict[str, float] = {}
 latest_prices_lock = asyncio.Lock()  # Asynchronous lock for safely accessing `latest_prices`
-
 
 logger = logging.getLogger(__name__)
 
@@ -32,23 +30,40 @@ VALID_CURRENCY_TYPES = ["BTC", "ETH", "LTC", "XRP", "BNB", "KES", "USD", "JPY", 
 
 # Function to validate the trade based on system's trading rules
 def validate_trade(order: OrderCreate):
+    # Convert the prediction to lowercase before validation
+    order.prediction = order.prediction.lower()
+
+    # Ensure the prediction matches 'rise' or 'fall'
+    if not re.match(r"^(rise|fall)$", order.prediction):
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Prediction must be either 'rise' or 'fall'.",
+                    "hint": "Check the casing and spelling of the 'prediction' field.",
+                    "valid_values": ["rise", "fall"],
+                    "input_received": order.predictio
+                    }
+        )
+
     if order.amount < MIN_TRADE_AMOUNT:
+        logger.error(f"Trade amount too low. Minimum trade amount is ${MIN_TRADE_AMOUNT}.")
         raise HTTPException(status_code=400,
                             detail=f"Trade amount too low. Minimum trade amount is ${MIN_TRADE_AMOUNT}.")
 
     if order.amount > MAX_TRADE_AMOUNT:
+        logger.error(f"Trade amount too high. Maximum trade amount is ${MAX_TRADE_AMOUNT}.")
         raise HTTPException(status_code=400,
                             detail=f"Trade amount too high. Maximum trade amount is ${MAX_TRADE_AMOUNT}.")
 
     if order.trade_time not in VALID_TRADE_TIMES:
+        logger.error("Invalid trade time. It must be between 30 seconds and 5 minutes, in 30-second intervals.")
         raise HTTPException(status_code=400,
-                            detail="Invalid trade time. It must be between 30 seconds and 5 minutes, in 30-second intervals.")
+                            detail="Invalid trade time. It must be between 30 seconds and 5 minutes, in 30-second "
+                                   "intervals.")
 
     if order.symbol not in VALID_CURRENCY_TYPES:
+        logger.error("Invalid currency type.")
         raise HTTPException(status_code=400, detail="Invalid currency type.")
 
-    if order.prediction not in ["rise", "fall"]:
-        raise HTTPException(status_code=400, detail="Prediction must be either 'rise' or 'fall'.")
 
 async def count_pending_orders_for_user(user_id: str) -> int:
     """
@@ -56,19 +71,17 @@ async def count_pending_orders_for_user(user_id: str) -> int:
     """
     return await MongoOrder.find({"user_id": PydanticObjectId(user_id), "status": "pending"}).count()
 
-# Simulating shared resource access safely
-latest_prices_lock = asyncio.Lock()
 
-async def place_order_with_real_time_price(order: OrderCreate, user_id: Optional[str] = None): # , user_id: str
+async def place_order_with_real_time_price(order: OrderCreate, user_id: Optional[str] = None):  # , user_id: str
     """
     Place an order with the current real-time price for the trading pair.
     If no user_id is provided, a temporary user ID will be used.
     """
 
-    #Use a temporary user ID if none is provided
+    # Use a temporary user ID if none is provided
 
     if user_id is None:
-        user_id = "6706b0b9571ca603c9868674"   # Temporary user ID
+        user_id = "6706b0b9571ca603c9868674"  # Temporary user ID
 
     # Validate trade data
     try:
@@ -115,7 +128,7 @@ async def place_order_with_real_time_price(order: OrderCreate, user_id: Optional
     print(f"Order placed: {order_data}")
 
     # Schedule the order evaluation after the specified trade time
-    schedule_evaluation(mongo_order.trade_time, str(mongo_order.id), real_time=True)
+    schedule_evaluation(mongo_order.trade_time, str(mongo_order.id))
 
     # Return the order data with the ID
     return {
@@ -196,10 +209,11 @@ async def evaluate_order_outcome_with_real_time_price(order_id: str):
         print(f"Error evaluating order {order_id}: {e}")
 
 
-def schedule_evaluation(trade_time: int, order_id: str, real_time=False):
+def schedule_evaluation(trade_time: int, order_id: str):
     """
     Schedules the evaluation of the order outcome after trade_time seconds.
     """
+
     async def evaluate():
         await asyncio.sleep(trade_time)  # Wait for the specified trade time
         await evaluate_order_outcome_with_real_time_price(order_id)

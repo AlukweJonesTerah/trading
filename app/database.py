@@ -22,6 +22,7 @@ MONGO_DB_NAME = config("MONGO_DB_NAME", default="trading_platform")
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 database = client[MONGO_DB_NAME]
 
+
 # Dependency to get the SQLAlchemy DB session
 def get_db():
     db = SessionLocal()

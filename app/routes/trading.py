@@ -2,30 +2,28 @@
 
 # Routes for handling trading logic
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from sqlalchemy.orm import Session
-from beanie import PydanticObjectId
-from cachetools import TTLCache
-from fastapi.security import OAuth2PasswordRequestForm
 import asyncio
-
-from app.database import get_db, SessionLocal
-from app.schemas import TradingPairResponse, OrderCreate, OrderResponse
-from app.services import trading_service
-from app.models import MongoTradingPair, MongoUser, MongoOrder
-from app.utils import fetch_real_time_prices, cache_lock
-from fastapi.security import OAuth2PasswordBearer
-from app.services.trading_service import validate_trade
-from jose import jwt, JWTError
 import logging
+from datetime import datetime, timedelta
+from typing import List, Dict
+
+from beanie import PydanticObjectId
 from bson import ObjectId
-from typing import List
-import app.services.trading_service
-from app.dependencies import get_current_user_id
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt
+from pydantic import ValidationError
+
+from app.models import MongoTradingPair, MongoUser, MongoOrder
+from app.schemas import OrderCreate, OrderResponse
+from app.services import trading_service
+from app.utils import fetch_real_time_prices
 
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+
 
 @router.websocket("/ws/prices")
 async def websocket_prices(websocket: WebSocket):
@@ -41,12 +39,6 @@ async def websocket_prices(websocket: WebSocket):
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-from fastapi import Depends, HTTPException
-from fastapi.security import OAuth2PasswordBearer
-from jose import jwt
-from pydantic import ValidationError
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 def decode_token(token: str):
     SECRET_KEY = "helpme1234"  # Use your actual secret key configured for JWT
@@ -56,6 +48,7 @@ def decode_token(token: str):
         return payload
     except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Could not validate credentials")
+
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(status_code=401, detail="Could not validate credentials")
@@ -99,7 +92,7 @@ async def get_dummy_user():
 
 
 @router.post("/api/trades/place_order", response_model=OrderResponse)
-async def place_order(order: OrderCreate):  #  , user_id: str = Depends(get_current_user_id)
+async def place_order(order: OrderCreate):  # , user_id: str = Depends(get_current_user_id)
     """
     Endpoint to place an order with the current real-time price for the trading pair.
     """
@@ -115,53 +108,6 @@ async def place_order(order: OrderCreate):  #  , user_id: str = Depends(get_curr
         print(f"Error placing order: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred while placing the order.")
 
-# @router.post("/api/trades/place_order", response_model=OrderResponse, tags=["Trading"])
-# async def place_order(order: OrderCreate):
-#     """
-#     Place an order based on real-time pricing data without authentication for testing purposes.
-#     """
-#     logger.info("Received order placement request.")
-#
-#     # Create a dummy user for testing purposes
-#     try:
-#         user = get_dummy_user()
-#     except Exception as e:
-#         logger.error(f"Failed to create or retrieve dummy user: {e}")
-#         raise HTTPException(status_code=500, detail="Failed to create or retrieve dummy user")
-#
-#     # Validate trade data
-#     try:
-#         validate_trade(order)
-#     except HTTPException as e:
-#         logger.error(f"Trade validation failed: {e.detail}")
-#         raise e
-#
-#     # Fetch real-time prices
-#     try:
-#         prices = await fetch_real_time_prices()
-#         if not prices.get(order.symbol):
-#             logger.error("Real-time price not available for the trading pair.")
-#             raise HTTPException(status_code=404, detail="Real-time price not available for the trading pair.")
-#     except Exception as e:
-#         logger.error(f"Failed to fetch real-time prices: {e}")
-#         raise HTTPException(status_code=500, detail="Failed to fetch real-time prices")
-#
-#     current_price = prices[order.symbol]
-#
-#     # Check user balance
-#     if user.balance < order.amount:
-#         logger.error("Insufficient balance.")
-#         raise HTTPException(status_code=400, detail="Insufficient balance")
-#
-#     # Place the order with the fetched real-time price
-#     try:
-#         mongo_order = trading_service.place_order_with_real_time_price(order, str(user.id), current_price)
-#     except Exception as e:
-#         logger.error(f"Failed to place order: {e}")
-#         raise HTTPException(status_code=500, detail="Failed to place order")
-#
-#     logger.info("Order placed successfully.")
-#     return mongo_order
 
 @router.get("/trades/real_time", response_model=dict)
 async def get_real_time_prices_endpoint():
@@ -190,6 +136,7 @@ async def get_user_balance():
 
     return {"balance": user.balance}
 
+
 @router.get("/{order_id}", response_model=OrderResponse)
 async def get_order(order_id: str):
     """
@@ -207,8 +154,9 @@ async def get_order(order_id: str):
 
     return order
 
-@router.get("/orders/user/{User_id}",  response_model=List[OrderResponse])
-async  def get_order_by_user(user_id: str):
+
+@router.get("/orders/user/{User_id}", response_model=List[OrderResponse])
+async def get_order_by_user(user_id: str):
     """
     Retrieve all orders placed by a specific user
     :param user_id: The ID of th user as a string.
@@ -225,7 +173,7 @@ async  def get_order_by_user(user_id: str):
         if not orders:
             raise HTTPException(status_code=404, detail="No orders found for the specified user.")
 
-        # convert each of the order's id to to string for JSON serialization
+        # convert each of the order's id to string for JSON serialization
         for order in orders:
             order.id = str(order.id)
             order.user_id = str(order.user_id)
@@ -234,6 +182,7 @@ async  def get_order_by_user(user_id: str):
     except Exception as e:
         print(f"Error fecting oders for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="An error occurred while retrieving user orders.")
+
 
 @router.post("/create_dummy_user", response_model=dict)
 async def create_dummy_user():
@@ -246,3 +195,93 @@ async def create_dummy_user():
     )
     await dummy_user.insert()
     return {"message": "Dummy user created successfully", "user_id": str(dummy_user.id)}
+
+
+@router.get("/users/orders", response_model=List[Dict])
+async def get_users_with_orders():
+    users_with_orders = []
+    async for user in MongoUser.find_all():
+        user_orders = await MongoOrder.find(MongoOrder.user_id == user.id).to_list()
+        user_data = {
+            "username": user.username,
+            "email": user.email,
+            "balance": user.balance,
+            "orders": [
+                {
+                    "order_id": str(order.id),
+                    "symbol": order.symbol,
+                    "amount": order.amount,
+                    "prediction": order.prediction,
+                    "trade_time": order.trade_time,
+                    "locked_price": order.locked_price,
+                    "status": order.status
+                }
+                for order in user_orders
+            ]
+        }
+        users_with_orders.append(user_data)
+
+    return users_with_orders
+
+
+@router.get("/users/orders/stats", response_model=Dict)
+async def get_users_with_orders_stats():
+    users_with_orders = []
+    total_users = 0
+    total_orders = 0
+    most_wins = {"username": None, "wins": 0}
+
+    async for user in MongoUser.find_all():
+        total_users += 1
+        user_orders = await MongoOrder.find(MongoOrder.user_id == user.id).to_list()
+        wins = sum(1 for order in user_orders if order.status == "win")
+        losses = sum(1 for order in user_orders if order.status == "lose")
+
+        # Update most wins
+        if wins > most_wins["wins"]:
+            most_wins = {"username": user.username, "wins": wins}
+
+        user_data = {
+            "username": user.username,
+            "email": user.email,
+            "orders": len(user_orders),
+            "wins": wins,
+            "losses": losses
+        }
+        total_orders += len(user_orders)
+        users_with_orders.append(user_data)
+
+    return {
+        "total_users": total_users,
+        "total_orders": total_orders,
+        "users_details": users_with_orders,
+        "user_with_most_wins": most_wins
+    }
+
+
+@router.get("/users/active", response_model=List[Dict])
+async def get_active_users():
+    """
+    Fetch all active users who have pending or recent orders.
+    """
+    active_users = []
+    current_time = datetime.utcnow()
+
+    async for user in MongoUser.find(MongoUser.is_active == True):
+        # Find all pending orders or recent orders placed in the last hour (for example)
+        recent_orders = await MongoOrder.find({
+            "user_id": user.id,
+            "$or": [
+                {"status": "pending"},  # Orders that are still pending
+                {"start_time": {"$gte": current_time - timedelta(hours=1)}}  # Orders placed in the last hour
+            ]
+        }).to_list()
+
+        if recent_orders:
+            active_users.append({
+                "username": user.username,
+                "email": user.email,
+                "active_orders_count": len(recent_orders)
+            })
+
+    return active_users
