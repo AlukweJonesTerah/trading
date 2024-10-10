@@ -10,10 +10,7 @@ from typing import List, Dict
 from beanie import PydanticObjectId
 from bson import ObjectId
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi import Depends, HTTPException
-from fastapi.security import OAuth2PasswordBearer
-from jose import jwt
-from pydantic import ValidationError
+from fastapi import HTTPException
 
 from app.models import MongoTradingPair, MongoUser, MongoOrder
 from app.schemas import OrderCreate, OrderResponse
@@ -25,8 +22,13 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.websocket("/ws/prices")
+@router.websocket("/ws/prices")  # should use web socket URL
 async def websocket_prices(websocket: WebSocket):
+    """
+    TODO create Rest api
+    :param websocket:
+    :return:
+    """
     await websocket.accept()
     try:
         while True:
@@ -35,40 +37,6 @@ async def websocket_prices(websocket: WebSocket):
             await asyncio.sleep(1)  # Send updates every second
     except WebSocketDisconnect:
         pass
-
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-
-def decode_token(token: str):
-    SECRET_KEY = "helpme1234"  # Use your actual secret key configured for JWT
-    ALGORITHM = "HS256"
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except jwt.JWTError:
-        raise HTTPException(status_code=401, detail="Could not validate credentials")
-
-
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(status_code=401, detail="Could not validate credentials")
-    try:
-        payload = decode_token(token)
-        user_id = payload.get("user_id")
-        if not user_id:
-            logger.error("User ID not found in token")
-            raise HTTPException(status_code=401, detail="Could not validate credentials")
-        user = await MongoUser.get(PydanticObjectId(user_id))
-        if not user:
-            logger.error(f"User not found: {user_id}")
-            raise HTTPException(status_code=404, detail="User not found")
-        return user
-    except jwt.JWTError as e:
-        logger.error(f"JWT Error: {str(e)}")
-        raise HTTPException(status_code=401, detail="Could not validate credentials")
-    except ValidationError as e:
-        logger.error(f"Validation Error: {str(e)}")
-        raise credentials_exception
 
 
 # Dummy function to simulate getting a user without authentication
@@ -199,6 +167,10 @@ async def create_dummy_user():
 
 @router.get("/users/orders", response_model=List[Dict])
 async def get_users_with_orders():
+    """
+    TODO: adding query param of pagination, and others
+    :return:
+    """
     users_with_orders = []
     async for user in MongoUser.find_all():
         user_orders = await MongoOrder.find(MongoOrder.user_id == user.id).to_list()
@@ -226,6 +198,10 @@ async def get_users_with_orders():
 
 @router.get("/users/orders/stats", response_model=Dict)
 async def get_users_with_orders_stats():
+    """
+       TODO: adding query param  range of number with wins also losses
+       :return:
+       """
     users_with_orders = []
     total_users = 0
     total_orders = 0
