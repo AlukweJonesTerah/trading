@@ -4,13 +4,12 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
-from typing import List, Dict
+from datetime import datetime, timedelta, date
+from typing import List, Dict, Optional
 
 from beanie import PydanticObjectId
 from bson import ObjectId
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi import HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException
 
 from app.models import MongoTradingPair, MongoUser, MongoOrder
 from app.schemas import OrderCreate, OrderResponse
@@ -166,14 +165,51 @@ async def create_dummy_user():
 
 
 @router.get("/users/orders", response_model=List[Dict])
-async def get_users_with_orders():
+async def get_users_with_orders(
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
+    sort_by: Optional[str] = Query(None),
+    sort_order: Optional[str] = Query("asc"),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    order_status: Optional[str] = Query(None),
+    min_balance: Optional[float] = Query(None),
+    max_balance: Optional[float] = Query(None)
+):
     """
-    TODO: adding query param of pagination, and others
-    :return:
+    Fetch users with their orders, with support for pagination, sorting, and filtering.
     """
+    skip = (page - 1) * limit
+    sort_order = 1 if sort_order == "asc" else -1
+    sort_criteria = {sort_by: sort_order} if sort_by else None
+
+    query_filters = {}
+    if status:
+        query_filters["status"] = status
+    if search:
+        query_filters["$or"] = [{"username": {"$regex": search, "$options": "i"}}, {"email": {"$regex": search, "$options": "i"}}]
+    if min_balance is not None:
+        query_filters["balance"] = {"$gte": min_balance}
+    if max_balance is not None:
+        query_filters["balance"] = {"$lte": max_balance, **query_filters.get("balance", {})}
+
+    find_query = MongoUser.find(query_filters).skip(skip).limit(limit)
+    if sort_criteria:
+        find_query = find_query.sort(sort_criteria)
+
     users_with_orders = []
-    async for user in MongoUser.find_all():
-        user_orders = await MongoOrder.find(MongoOrder.user_id == user.id).to_list()
+    async for user in find_query:
+        order_query = MongoOrder.find({"user_id": user.id})
+        if start_date:
+            order_query = order_query.find({"start_time": {"$gte": start_date}})
+        if end_date:
+            order_query = order_query.find({"start_time": {"$lte": end_date}})
+        if order_status:
+            order_query = order_query.find({"status": order_status})
+
+        user_orders = await order_query.to_list()
         user_data = {
             "username": user.username,
             "email": user.email,
@@ -195,23 +231,38 @@ async def get_users_with_orders():
 
     return users_with_orders
 
-
 @router.get("/users/orders/stats", response_model=Dict)
-async def get_users_with_orders_stats():
+async def get_users_with_orders_stats(
+    min_wins: Optional[int] = Query(None, description="Minimum number of wins"),
+    max_wins: Optional[int] = Query(None, description="Maximum number of wins"),
+    min_losses: Optional[int] = Query(None, description="Minimum number of losses"),
+    max_losses: Optional[int] = Query(None, description="Maximum number of losses")
+):
     """
-       TODO: adding query param  range of number with wins also losses
-       :return:
-       """
+    Fetch aggregated statistics about users and their orders with options to filter by the number of wins and losses.
+    """
     users_with_orders = []
     total_users = 0
     total_orders = 0
     most_wins = {"username": None, "wins": 0}
 
     async for user in MongoUser.find_all():
-        total_users += 1
         user_orders = await MongoOrder.find(MongoOrder.user_id == user.id).to_list()
         wins = sum(1 for order in user_orders if order.status == "win")
         losses = sum(1 for order in user_orders if order.status == "lose")
+
+        # Apply filters for wins and losses
+        if min_wins is not None and wins < min_wins:
+            continue
+        if max_wins is not None and wins > max_wins:
+            continue
+        if min_losses is not None and losses < min_losses:
+            continue
+        if max_losses is not None and losses > max_losses:
+            continue
+
+        total_users += 1
+        total_orders += len(user_orders)
 
         # Update most wins
         if wins > most_wins["wins"]:
@@ -224,7 +275,6 @@ async def get_users_with_orders_stats():
             "wins": wins,
             "losses": losses
         }
-        total_orders += len(user_orders)
         users_with_orders.append(user_data)
 
     return {
@@ -235,16 +285,17 @@ async def get_users_with_orders_stats():
     }
 
 
+
 @router.get("/users/active", response_model=List[Dict])
 async def get_active_users():
     """
-    Fetch all active users who have pending or recent orders.
+    Fetch all active users who have pending or recent orders within the last hour.
     """
     active_users = []
     current_time = datetime.utcnow()
 
     async for user in MongoUser.find(MongoUser.is_active == True):
-        # Find all pending orders or recent orders placed in the last hour (for example)
+        # Find all pending orders or recent orders placed in the last hour
         recent_orders = await MongoOrder.find({
             "user_id": user.id,
             "$or": [
